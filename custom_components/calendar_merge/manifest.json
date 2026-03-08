@@ -1,0 +1,12 @@
+{
+  "domain": "calendar_merge",
+  "name": "Calendar Merge",
+  "version": "1.0.0",
+  "documentation": "https://github.com/superdingo101/ha-calendar-merge",
+  "issue_tracker": "https://github.com/superdingo101/ha-calendar-merge/issues",
+  "dependencies": ["calendar"],
+  "codeowners": [],
+  "requirements": [],
+  "iot_class": "local_push",
+  "config_flow": true
+}

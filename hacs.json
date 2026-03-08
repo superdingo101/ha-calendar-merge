@@ -1,0 +1,7 @@
+{
+  "name": "Calendar Merge",
+  "content_in_root": false,
+  "homeassistant": "2023.4.0",
+  "render_readme": true,
+  "categories": ["integration"]
+}

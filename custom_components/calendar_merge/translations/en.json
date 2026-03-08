@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up a Merged Calendar",
+        "description": "Create a new calendar entity that combines events from multiple source calendars.",
+        "data": {
+          "name": "Merged Calendar Name",
+          "entity_id": "Source Calendars",
+          "default_calendar": "Default Calendar for New Events"
+        },
+        "data_description": {
+          "name": "The name for the new merged calendar entity.",
+          "entity_id": "Select two or more calendar entities to merge.",
+          "default_calendar": "Optional. New events created from this merged calendar will be saved here. Must be one of the source calendars above."
+        }
+      }
+    },
+    "error": {
+      "name_required": "A name is required.",
+      "no_sources": "Please select at least one source calendar.",
+      "default_not_in_sources": "The default calendar must be one of the selected source calendars."
+    },
+    "abort": {
+      "already_configured": "A merged calendar with this name already exists."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Update Merged Calendar",
+        "data": {
+          "name": "Merged Calendar Name",
+          "entity_id": "Source Calendars",
+          "default_calendar": "Default Calendar for New Events"
+        },
+        "data_description": {
+          "name": "The name for the merged calendar entity.",
+          "entity_id": "Select two or more calendar entities to merge.",
+          "default_calendar": "Optional. New events created from this merged calendar will be saved here. Must be one of the source calendars above."
+        }
+      }
+    },
+    "error": {
+      "name_required": "A name is required.",
+      "no_sources": "Please select at least one source calendar.",
+      "default_not_in_sources": "The default calendar must be one of the selected source calendars."
+    }
+  }
+}
+
