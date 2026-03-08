@@ -1,6 +1,10 @@
 # Calendar Merge — Home Assistant Custom Integration
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![GitHub release](https://img.shields.io/github/release/superdingo101/ha-calendar-merge.svg)](https://github.com/superdingo101/ha-calendar-merge/releases)
+[![GitHub stars](https://img.shields.io/github/stars/superdingo101/ha-calendar-merge.svg)](https://github.com/superdingo101/ha-calendar-merge/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/superdingo101/ha-calendar-merge.svg)](https://github.com/superdingo101/ha-calendar-merge/issues)
+[![License](https://img.shields.io/github/license/superdingo101/ha-calendar-merge.svg)](LICENSE)
 
 Combine multiple Home Assistant `calendar.*` entities into a single, new virtual calendar entity. Each merged calendar is fully independent — you can create as many as you like (e.g. a *Work* calendar merging `calendar.google_work` + `calendar.outlook`, and a *Family* calendar merging `calendar.family` + `calendar.birthdays`).
 
@@ -124,6 +128,24 @@ The `duplicate_events` attribute on the entity exposes a full map of which event
 
 ---
 
-## Contributing
+## Help
 
-Issues and pull requests welcome at `https://github.com/superdingo101/ha-calendar-merge`.
+Feel free to open an issue if something is not working as expected. 
+
+[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-green?logo=github&style=for-the-badge)](https://github.com/superdingo101/ha-calendar-merge/issues)
+
+Got questions or thoughts? Want to share your dashboards? You can go on the Home Assistant forum or on the GitHub Discussions section.
+
+[![GitHub Discussions](https://img.shields.io/badge/GitHub-Discussions-lightgrey?logo=github&style=for-the-badge)](https://github.com/superdingo101/ha-calendar-merge/discussions)
+
+<br>
+
+## Donate
+
+If you appreciate my work, any donation would be a great way to show your support 🍻
+
+[![Buy me a beer](https://img.shields.io/badge/Donate-Buy%20me%20a%20beer-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/superdingo101)
+
+<br>
+
+Thank you everyone for your support, you all are my greatest motivation!
