@@ -5,7 +5,11 @@ import logging
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from homeassistant.components.calendar import CalendarEntity, CalendarEvent
+from homeassistant.components.calendar import (
+    CalendarEntity,
+    CalendarEntityFeature,
+    CalendarEvent,
+)
 from homeassistant.components.calendar import DOMAIN as CALENDAR_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -146,18 +150,15 @@ def _get_calendar_entity(
     return entity
 
 
-def _supports_write(entity: CalendarEntity, method: str) -> bool:
+def _source_supports(entity: CalendarEntity, feature: CalendarEntityFeature) -> bool:
     """
-    Return True if the entity's concrete class has overridden the given write
-    method (meaning it supports that write operation).
+    Return True if the source entity declares the given CalendarEntityFeature.
+
+    This is the correct HA-idiomatic way to check write capability — inspect
+    the entity's supported_features bitmask rather than poking at the MRO.
     """
-    for cls in type(entity).__mro__:
-        if cls is CalendarEntity:
-            # Reached the base class without finding an override
-            return False
-        if method in cls.__dict__:
-            return True
-    return False
+    supported = entity.supported_features or 0
+    return bool(supported & feature)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +172,7 @@ class MergedCalendarEntity(CalendarEntity):
     Read:
       Events are fetched from all sources, deduplicated (by UID, or summary
       + start time as fallback), and returned as a single sorted list.
-      Duplicates get an annotation appended to their description that lists
+      Duplicates get an annotation appended to their description listing
       every source calendar that contained them.
 
     Write (Update / Delete):
@@ -182,8 +183,18 @@ class MergedCalendarEntity(CalendarEntity):
     Write (Create):
       Routed to the configured default_calendar. Raises HomeAssistantError if
       none is configured or if that calendar does not support writes.
+
+    Supported features are always advertised as CREATE | UPDATE | DELETE.
+    At runtime, if a source calendar does not actually support a requested
+    operation, a descriptive HomeAssistantError is raised instead.
     """
 
+    # Always advertise all write features. We validate per-source at runtime.
+    _attr_supported_features = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+    )
     _attr_should_poll = True
 
     def __init__(
@@ -254,10 +265,9 @@ class MergedCalendarEntity(CalendarEntity):
         """
         Create a new event on the configured default calendar.
 
-        Raises HomeAssistantError if:
-          - No default calendar is configured.
-          - The default calendar entity cannot be found.
-          - The default calendar does not support creating events.
+        HA passes event fields as keyword arguments matching CalendarEvent fields
+        (summary, dtstart, dtend, description, location, rrule, etc.).
+        We forward them verbatim to the target source entity.
         """
         if not self._default_calendar:
             raise HomeAssistantError(
@@ -271,7 +281,7 @@ class MergedCalendarEntity(CalendarEntity):
                 f"Calendar Merge: default calendar '{self._default_calendar}' not found."
             )
 
-        if not _supports_write(entity, "async_create_event"):
+        if not _source_supports(entity, CalendarEntityFeature.CREATE_EVENT):
             raise HomeAssistantError(
                 f"Calendar Merge: '{self._default_calendar}' does not support "
                 "creating events (it may be read-only)."
@@ -287,15 +297,15 @@ class MergedCalendarEntity(CalendarEntity):
     async def async_update_event(
         self,
         uid: str,
-        event: CalendarEvent,
+        event: dict[str, Any],
         recurrence_id: str | None = None,
         recurrence_range: str | None = None,
     ) -> None:
         """
         Update an existing event, proxied to every source calendar that owns it.
 
-        The Calendar Merge annotation is stripped from the description before
-        forwarding, so the source events are not polluted with our metadata.
+        HA passes the updated event as a plain dict of rfc5545 fields.
+        We strip our merge annotation from the description field before forwarding.
         """
         sources = self._resolve_sources_for_uid(uid)
         if not sources:
@@ -305,16 +315,11 @@ class MergedCalendarEntity(CalendarEntity):
             )
 
         # Strip our annotation from the description before sending upstream
-        clean_event = CalendarEvent(
-            start=event.start,
-            end=event.end,
-            summary=event.summary,
-            description=_strip_merge_description(event.description),
-            location=event.location,
-            uid=event.uid,
-            recurrence_id=getattr(event, "recurrence_id", None),
-            rrule=getattr(event, "rrule", None),
-        )
+        clean_event = dict(event)
+        if "description" in clean_event:
+            clean_event["description"] = _strip_merge_description(
+                clean_event["description"]
+            )
 
         errors: list[str] = []
         for entity_id in sources:
@@ -322,7 +327,7 @@ class MergedCalendarEntity(CalendarEntity):
             if entity is None:
                 errors.append(f"{entity_id}: entity not found")
                 continue
-            if not _supports_write(entity, "async_update_event"):
+            if not _source_supports(entity, CalendarEntityFeature.UPDATE_EVENT):
                 errors.append(f"{entity_id}: does not support updating events (read-only)")
                 continue
             try:
@@ -367,7 +372,7 @@ class MergedCalendarEntity(CalendarEntity):
             if entity is None:
                 errors.append(f"{entity_id}: entity not found")
                 continue
-            if not _supports_write(entity, "async_delete_event"):
+            if not _source_supports(entity, CalendarEntityFeature.DELETE_EVENT):
                 errors.append(f"{entity_id}: does not support deleting events (read-only)")
                 continue
             try:
@@ -394,17 +399,11 @@ class MergedCalendarEntity(CalendarEntity):
     # ------------------------------------------------------------------
 
     def _resolve_sources_for_uid(self, uid: str) -> list[str]:
-        """
-        Return the source entity IDs that provided the event with the given UID.
-
-        Checks the uid-prefixed key first (fastest path), then falls back to
-        a substring scan for events that were deduped by title+start but whose
-        UID is referenced in the map key.
-        """
+        """Return source entity IDs that provided the event with the given UID."""
         key = f"uid\x00{uid}"
         if key in self._source_map:
             return self._source_map[key]
-        # Fallback: partial match in case key format differs
+        # Fallback: partial match for events deduped by title+start
         if uid:
             for map_key, sources in self._source_map.items():
                 if uid in map_key:
