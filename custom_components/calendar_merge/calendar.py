@@ -67,22 +67,47 @@ def _to_datetime(value: datetime | date) -> datetime:
     )
 
 
+def _normalize_start(start: "datetime | date") -> str:
+    """
+    Produce a stable, timezone-independent string from an event start value.
+
+    Different calendar integrations return start times in different forms:
+      - timezone-aware datetime (e.g. Google Calendar)
+      - naive datetime (e.g. local CalDAV)
+      - date object (all-day events)
+
+    Without normalization, isoformat() produces different strings for the
+    same logical moment, causing deduplication to silently fail.
+
+    Strategy:
+      - All-day events (date): use YYYY-MM-DD — no timezone ambiguity.
+      - Timed events: convert to UTC, truncate to minute precision to absorb
+        any second-level drift between sources.
+    """
+    if isinstance(start, datetime):
+        if start.tzinfo is None:
+            start = dt_util.as_local(start)
+        utc = dt_util.as_utc(start)
+        return utc.strftime("%Y-%m-%dT%H:%M")
+    return start.isoformat()
+
+
 def _dedup_key(event: CalendarEvent) -> str:
     """
     Return a stable deduplication key for an event.
 
     Priority:
       1. UID (most reliable – set by calendar servers)
-      2. summary + ISO start string (fallback for caldav-less calendars)
+      2. normalised summary + normalised start (fallback for caldav-less calendars)
+
+    Summary is lowercased and stripped so minor capitalisation or whitespace
+    differences between sources do not prevent matching.
     """
     if event.uid:
         return f"uid\x00{event.uid}"
-    start_str = (
-        event.start.isoformat()
-        if hasattr(event.start, "isoformat")
-        else str(event.start)
-    )
-    return f"title_start\x00{event.summary}\x00{start_str}"
+    summary = (event.summary or "").strip().lower()
+    start_str = _normalize_start(event.start)
+    return f"title_start\x00{summary}\x00{start_str}"
 
 
 def _strip_merge_description(description: str | None) -> str | None:
@@ -214,6 +239,8 @@ class MergedCalendarEntity(CalendarEntity):
         self._event: CalendarEvent | None = None
         # dedup_key → list[source_entity_id]; kept in sync on every fetch
         self._source_map: dict[str, list[str]] = {}
+        # entity_id → event count or error string; updated on every fetch
+        self._fetch_stats: dict[str, int | str] = {}
 
     # ------------------------------------------------------------------
     # Read interface
@@ -234,6 +261,7 @@ class MergedCalendarEntity(CalendarEntity):
             "source_calendars": self._source_entity_ids,
             "default_calendar": self._default_calendar,
             "duplicate_events": duplicates,
+            "last_fetch_stats": self._fetch_stats,
         }
 
     async def async_get_events(
@@ -422,23 +450,40 @@ class MergedCalendarEntity(CalendarEntity):
         source_map maps dedup_key → [source_entity_ids].
         """
         seen: dict[str, tuple[CalendarEvent, list[str]]] = {}
-
-        calendar_component = self.hass.data.get(CALENDAR_DOMAIN)
-        if calendar_component is None:
-            _LOGGER.warning("Calendar component not available; cannot fetch source events.")
-            return [], {}
+        # Track per-source stats for diagnostics
+        fetch_stats: dict[str, int | str] = {}
 
         for entity_id in self._source_entity_ids:
-            entity = calendar_component.get_entity(entity_id)
+            entity = self._resolve_entity(entity_id)
             if entity is None:
-                _LOGGER.debug("Source calendar entity not found: %s", entity_id)
+                fetch_stats[entity_id] = "NOT FOUND"
+                _LOGGER.warning(
+                    "Calendar Merge (%s): source entity '%s' could not be resolved. "
+                    "Check that the entity exists and is loaded.",
+                    self._attr_name,
+                    entity_id,
+                )
                 continue
             try:
                 raw_events: list[CalendarEvent] = await entity.async_get_events(
                     self.hass, start_date, end_date
                 )
+                fetch_stats[entity_id] = len(raw_events)
+                _LOGGER.debug(
+                    "Calendar Merge (%s): fetched %d event(s) from '%s' for %s→%s",
+                    self._attr_name,
+                    len(raw_events),
+                    entity_id,
+                    start_date.date(),
+                    end_date.date(),
+                )
             except Exception:  # noqa: BLE001
-                _LOGGER.exception("Error fetching events from %s", entity_id)
+                fetch_stats[entity_id] = "ERROR"
+                _LOGGER.exception(
+                    "Calendar Merge (%s): error fetching events from '%s'",
+                    self._attr_name,
+                    entity_id,
+                )
                 continue
 
             for event in raw_events:
@@ -456,4 +501,52 @@ class MergedCalendarEntity(CalendarEntity):
             merged_events.append(_build_merged_event(event, sources))
 
         merged_events.sort(key=lambda e: _to_datetime(e.start))
+
+        # Persist stats so they appear as entity attributes
+        self._fetch_stats = fetch_stats
+
+        _LOGGER.debug(
+            "Calendar Merge (%s): merged to %d event(s). Per-source: %s",
+            self._attr_name,
+            len(merged_events),
+            fetch_stats,
+        )
         return merged_events, source_map
+
+    def _resolve_entity(self, entity_id: str) -> "CalendarEntity | None":
+        """
+        Resolve a source CalendarEntity using multiple lookup strategies.
+
+        HA 2024+ changed how entity components store entities internally.
+        We try the EntityComponent approach first, then fall back to
+        iterating over all calendar platforms registered in hass.data,
+        to handle cases where get_entity() returns None despite the entity
+        being alive and registered.
+        """
+        # Strategy 1: EntityComponent lookup (works in most HA versions)
+        calendar_component = self.hass.data.get(CALENDAR_DOMAIN)
+        if calendar_component is not None:
+            entity = calendar_component.get_entity(entity_id)
+            if entity is not None and isinstance(entity, CalendarEntity):
+                return entity
+
+        # Strategy 2: Iterate registered entity platforms for this domain.
+        # In HA 2024+ each platform registers itself under
+        # hass.data["entity_components"][CALENDAR_DOMAIN] or via platform list.
+        for key, value in self.hass.data.items():
+            if key == DOMAIN:
+                # Skip our own data
+                continue
+            if hasattr(value, "get_entity"):
+                try:
+                    entity = value.get_entity(entity_id)
+                    if entity is not None and isinstance(entity, CalendarEntity):
+                        _LOGGER.debug(
+                            "Resolved '%s' via fallback lookup key '%s'",
+                            entity_id, key,
+                        )
+                        return entity
+                except Exception:  # noqa: BLE001
+                    pass
+
+        return None
