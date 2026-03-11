@@ -273,6 +273,64 @@ def test_merge_deduplicates_by_uid_across_google_caldav_and_native(calendar_modu
     assert "calendar.homeassistant" in description
 
 
+def test_merge_deduplicates_same_event_with_different_uids(calendar_module):
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [
+                CalendarEvent(
+                    uid="google-abc",
+                    summary="Soccer Practice",
+                    start=datetime(2024, 3, 12, 17, 0, tzinfo=timezone.utc),
+                    end=datetime(2024, 3, 12, 18, 0, tzinfo=timezone.utc),
+                )
+            ],
+            CalendarEntityFeature.CREATE_EVENT
+            | CalendarEntityFeature.UPDATE_EVENT
+            | CalendarEntityFeature.DELETE_EVENT,
+        ),
+        "calendar.apple_family": FakeSourceCalendar(
+            [
+                CalendarEvent(
+                    uid="caldav-xyz",
+                    summary="Soccer Practice",
+                    start=datetime(2024, 3, 12, 17, 0),
+                    end=datetime(2024, 3, 12, 18, 0),
+                )
+            ],
+            CalendarEntityFeature.CREATE_EVENT
+            | CalendarEntityFeature.UPDATE_EVENT
+            | CalendarEntityFeature.DELETE_EVENT,
+        ),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-uids",
+        "Merged",
+        list(entities.keys()),
+        "calendar.google_work",
+    )
+
+    events = _run(
+        merged.async_get_events(
+            hass,
+            datetime(2024, 3, 1, tzinfo=timezone.utc),
+            datetime(2024, 3, 30, tzinfo=timezone.utc),
+        )
+    )
+
+    assert len(events) == 1
+    assert merged._source_map["uid\x00google-abc"] == [
+        "calendar.google_work",
+        "calendar.apple_family",
+    ]
+    assert merged._source_map["uid\x00caldav-xyz"] == [
+        "calendar.google_work",
+        "calendar.apple_family",
+    ]
+
+
 def test_merge_deduplicates_by_title_and_start_when_uid_missing(calendar_module):
     start_naive = datetime(2024, 2, 10, 14, 0)
     start_aware = datetime(2024, 2, 10, 14, 0, tzinfo=timezone.utc)

@@ -67,7 +67,7 @@ def _to_datetime(value: datetime | date) -> datetime:
     )
 
 
-def _normalize_start(start: "datetime | date") -> str:
+def _normalize_when(value: "datetime | date") -> str:
     """
     Produce a stable, timezone-independent string from an event start value.
 
@@ -84,30 +84,34 @@ def _normalize_start(start: "datetime | date") -> str:
       - Timed events: convert to UTC, truncate to minute precision to absorb
         any second-level drift between sources.
     """
-    if isinstance(start, datetime):
-        if start.tzinfo is None:
-            start = dt_util.as_local(start)
-        utc = dt_util.as_utc(start)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = dt_util.as_local(value)
+        utc = dt_util.as_utc(value)
         return utc.strftime("%Y-%m-%dT%H:%M")
-    return start.isoformat()
+    return value.isoformat()
 
 
 def _dedup_key(event: CalendarEvent) -> str:
     """
     Return a stable deduplication key for an event.
 
-    Priority:
-      1. UID (most reliable – set by calendar servers)
-      2. normalised summary + normalised start (fallback for caldav-less calendars)
+    Key strategy:
+      - normalized summary
+      - normalized start
+      - normalized end
 
     Summary is lowercased and stripped so minor capitalisation or whitespace
     differences between sources do not prevent matching.
+
+    We intentionally do not use UID as the primary key because mirrored events
+    from different calendar providers often have different UIDs while still
+    representing the same real-world event.
     """
-    if event.uid:
-        return f"uid\x00{event.uid}"
     summary = (event.summary or "").strip().lower()
-    start_str = _normalize_start(event.start)
-    return f"title_start\x00{summary}\x00{start_str}"
+    start_str = _normalize_when(event.start)
+    end_str = _normalize_when(event.end)
+    return f"summary_start_end\x00{summary}\x00{start_str}\x00{end_str}"
 
 
 def _strip_merge_description(description: str | None) -> str | None:
@@ -449,7 +453,7 @@ class MergedCalendarEntity(CalendarEntity):
         Returns (merged_event_list, source_map).
         source_map maps dedup_key → [source_entity_ids].
         """
-        seen: dict[str, tuple[CalendarEvent, list[str]]] = {}
+        seen: dict[str, tuple[CalendarEvent, list[str], set[str]]] = {}
         # Track per-source stats for diagnostics
         fetch_stats: dict[str, int | str] = {}
 
@@ -490,14 +494,18 @@ class MergedCalendarEntity(CalendarEntity):
                 key = _dedup_key(event)
                 if key in seen:
                     seen[key][1].append(entity_id)
+                    if event.uid:
+                        seen[key][2].add(event.uid)
                 else:
-                    seen[key] = (event, [entity_id])
+                    seen[key] = (event, [entity_id], {event.uid} if event.uid else set())
 
         merged_events: list[CalendarEvent] = []
         source_map: dict[str, list[str]] = {}
 
-        for key, (event, sources) in seen.items():
+        for key, (event, sources, uids) in seen.items():
             source_map[key] = sources
+            for uid in uids:
+                source_map[f"uid\x00{uid}"] = sources
             merged_events.append(_build_merged_event(event, sources))
 
         merged_events.sort(key=lambda e: _to_datetime(e.start))
