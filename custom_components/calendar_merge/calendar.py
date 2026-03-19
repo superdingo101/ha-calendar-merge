@@ -161,6 +161,40 @@ def _build_merged_event(
     )
 
 
+def _calendar_event_from_create_kwargs(kwargs: dict[str, Any]) -> CalendarEvent | None:
+    """Build a best-effort CalendarEvent from create-event kwargs."""
+    start = kwargs.get("start")
+    end = kwargs.get("end")
+
+    if start is None:
+        start = kwargs.get("start_date_time", kwargs.get("start_date"))
+    if end is None:
+        end = kwargs.get("end_date_time", kwargs.get("end_date"))
+
+    if start is None or end is None:
+        return None
+
+    return CalendarEvent(
+        start=start,
+        end=end,
+        summary=kwargs.get("summary"),
+        description=kwargs.get("description"),
+        location=kwargs.get("location"),
+        uid=kwargs.get("uid"),
+        recurrence_id=kwargs.get("recurrence_id"),
+        rrule=kwargs.get("rrule"),
+    )
+
+
+def _lookup_window_for_created_event(
+    event: CalendarEvent,
+) -> tuple[datetime, datetime]:
+    """Return a fetch window wide enough to re-read a newly created event."""
+    start_dt = _to_datetime(event.start) - timedelta(days=1)
+    end_dt = _to_datetime(event.end) + timedelta(days=1)
+    return start_dt, end_dt
+
+
 def _get_calendar_entity(
     hass: HomeAssistant, entity_id: str
 ) -> CalendarEntity | None:
@@ -325,6 +359,16 @@ class MergedCalendarEntity(CalendarEntity):
             self._default_calendar,
         )
         await entity.async_create_event(**kwargs)
+        await self._async_refresh_default_calendar_after_create(entity)
+        await self.async_update()
+
+        created_event = _calendar_event_from_create_kwargs(kwargs)
+        if created_event is not None:
+            await self._async_seed_source_map_for_created_event(
+                entity,
+                self._default_calendar,
+                created_event,
+            )
 
     async def async_update_event(
         self,
@@ -441,6 +485,75 @@ class MergedCalendarEntity(CalendarEntity):
                 if uid in map_key:
                     return sources
         return []
+
+    async def _async_refresh_default_calendar_after_create(
+        self,
+        entity: CalendarEntity,
+    ) -> None:
+        """Best-effort refresh of the default source calendar after create."""
+        try:
+            await self.hass.services.async_call(
+                "homeassistant",
+                "update_entity",
+                {"entity_id": self._default_calendar},
+                blocking=True,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "update_entity refresh failed for %s; falling back to async_update",
+                self._default_calendar,
+                exc_info=True,
+            )
+
+        if hasattr(entity, "async_update"):
+            try:
+                await entity.async_update()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Direct async_update refresh failed for %s",
+                    self._default_calendar,
+                    exc_info=True,
+                )
+
+    async def _async_seed_source_map_for_created_event(
+        self,
+        entity: CalendarEntity,
+        entity_id: str,
+        created_event: CalendarEvent,
+    ) -> None:
+        """Populate source mapping for a newly created event once it is readable."""
+        start_date, end_date = _lookup_window_for_created_event(created_event)
+        try:
+            events = await entity.async_get_events(self.hass, start_date, end_date)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Unable to re-read newly created event from %s for source-map seeding",
+                entity_id,
+                exc_info=True,
+            )
+            return
+
+        created_key = _dedup_key(created_event)
+        for source_event in events:
+            if _dedup_key(source_event) != created_key:
+                continue
+
+            owners = list(dict.fromkeys([*self._source_map.get(created_key, []), entity_id]))
+            self._source_map[created_key] = owners
+            if source_event.uid:
+                uid_key = f"uid\x00{source_event.uid}"
+                uid_owners = list(
+                    dict.fromkeys([*self._source_map.get(uid_key, []), *owners])
+                )
+                self._source_map[uid_key] = uid_owners
+            _LOGGER.debug(
+                "Seeded source map for newly created event uid=%r on %s with owners=%s",
+                source_event.uid,
+                entity_id,
+                owners,
+            )
+            return
 
     async def _fetch_and_merge(
         self,

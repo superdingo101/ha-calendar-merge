@@ -43,6 +43,7 @@ class HomeAssistantError(Exception):
 class HomeAssistant:
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
+        self.services: Any = None
 
 
 class FakeCalendarComponent:
@@ -60,14 +61,18 @@ class FakeSourceCalendar(CalendarEntity):
         features: CalendarEntityFeature,
         should_raise_on_update: bool = False,
         should_raise_on_delete: bool = False,
+        created_event_uid: str | None = None,
     ) -> None:
         self._events = events
+        self._pending_events: list[CalendarEvent] = []
         self.supported_features = int(features)
         self.should_raise_on_update = should_raise_on_update
         self.should_raise_on_delete = should_raise_on_delete
+        self.created_event_uid = created_event_uid
         self.created: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
         self.deleted: list[dict[str, Any]] = []
+        self.update_calls = 0
 
     async def async_get_events(
         self, hass: Any, start_date: datetime, end_date: datetime
@@ -76,6 +81,28 @@ class FakeSourceCalendar(CalendarEntity):
 
     async def async_create_event(self, **kwargs: Any) -> None:
         self.created.append(kwargs)
+        start = kwargs.get("start_date_time", kwargs.get("start_date"))
+        end = kwargs.get("end_date_time", kwargs.get("end_date"))
+        if start is None or end is None:
+            return
+
+        uid = kwargs.get("uid", self.created_event_uid)
+        self._pending_events.append(
+            CalendarEvent(
+                start=start,
+                end=end,
+                summary=kwargs.get("summary"),
+                description=kwargs.get("description"),
+                location=kwargs.get("location"),
+                uid=uid,
+            )
+        )
+
+    async def async_update(self) -> None:
+        self.update_calls += 1
+        if self._pending_events:
+            self._events.extend(self._pending_events)
+            self._pending_events = []
 
     async def async_update_event(
         self,
@@ -110,6 +137,33 @@ class FakeSourceCalendar(CalendarEntity):
                 "recurrence_range": recurrence_range,
             }
         )
+
+
+class FakeServices:
+    def __init__(self, entities: dict[str, CalendarEntity]) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._entities = entities
+
+    async def async_call(
+        self,
+        domain: str,
+        service: str,
+        data: dict[str, Any],
+        blocking: bool = False,
+    ) -> None:
+        self.calls.append(
+            {
+                "domain": domain,
+                "service": service,
+                "data": data,
+                "blocking": blocking,
+            }
+        )
+        if domain == "homeassistant" and service == "update_entity":
+            entity_id = data["entity_id"]
+            entity = self._entities[entity_id]
+            if hasattr(entity, "async_update"):
+                await entity.async_update()
 
 
 @pytest.fixture
@@ -454,6 +508,7 @@ def test_create_routes_to_default_calendar_for_each_calendar_type(calendar_modul
     }
     hass = HomeAssistant()
     hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
     merged = calendar_module.MergedCalendarEntity(
         hass,
         "entry-4",
@@ -462,12 +517,26 @@ def test_create_routes_to_default_calendar_for_each_calendar_type(calendar_modul
         target,
     )
 
-    _run(merged.async_create_event(summary="Created", dtstart="2024-01-02T10:00:00Z"))
+    _run(
+        merged.async_create_event(
+            summary="Created",
+            start_date_time=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc),
+            end_date_time=datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc),
+        )
+    )
 
     for entity_id, source in entities.items():
         if entity_id == target:
             assert source.created == [
-                {"summary": "Created", "dtstart": "2024-01-02T10:00:00Z"}
+                {
+                    "summary": "Created",
+                    "start_date_time": datetime(
+                        2024, 1, 2, 10, 0, tzinfo=timezone.utc
+                    ),
+                    "end_date_time": datetime(
+                        2024, 1, 2, 11, 0, tzinfo=timezone.utc
+                    ),
+                }
             ]
         else:
             assert source.created == []
@@ -476,6 +545,7 @@ def test_create_routes_to_default_calendar_for_each_calendar_type(calendar_modul
 def test_create_raises_without_default_calendar(calendar_module):
     hass = HomeAssistant()
     hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent({})
+    hass.services = FakeServices({})
     merged = calendar_module.MergedCalendarEntity(
         hass,
         "entry-5",
@@ -491,6 +561,7 @@ def test_create_raises_without_default_calendar(calendar_module):
 def test_create_raises_when_default_calendar_missing(calendar_module):
     hass = HomeAssistant()
     hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent({})
+    hass.services = FakeServices({})
     merged = calendar_module.MergedCalendarEntity(
         hass,
         "entry-6",
@@ -509,6 +580,7 @@ def test_create_raises_when_default_calendar_is_read_only(calendar_module):
     }
     hass = HomeAssistant()
     hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
     merged = calendar_module.MergedCalendarEntity(
         hass,
         "entry-7",
@@ -519,6 +591,156 @@ def test_create_raises_when_default_calendar_is_read_only(calendar_module):
 
     with pytest.raises(HomeAssistantError, match="does not support creating"):
         _run(merged.async_create_event(summary="bad"))
+
+
+def test_create_refreshes_default_calendar_and_seeds_source_map(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [], full, created_event_uid="google-created-uid"
+        ),
+        "calendar.apple_family": FakeSourceCalendar([], full),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-7b",
+        "Merged",
+        list(entities.keys()),
+        "calendar.google_work",
+    )
+
+    _run(
+        merged.async_create_event(
+            summary="Created",
+            start_date_time=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc),
+            end_date_time=datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc),
+        )
+    )
+
+    assert hass.services.calls == [
+        {
+            "domain": "homeassistant",
+            "service": "update_entity",
+            "data": {"entity_id": "calendar.google_work"},
+            "blocking": True,
+        }
+    ]
+    assert entities["calendar.google_work"].update_calls == 1
+    assert merged._resolve_sources_for_uid("google-created-uid") == [
+        "calendar.google_work"
+    ]
+
+
+def test_delete_after_create_uses_seeded_uid_mapping(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [], full, created_event_uid="google-created-uid"
+        ),
+        "calendar.apple_family": FakeSourceCalendar([], full),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-7c",
+        "Merged",
+        list(entities.keys()),
+        "calendar.google_work",
+    )
+
+    _run(
+        merged.async_create_event(
+            summary="Created",
+            start_date_time=datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc),
+            end_date_time=datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc),
+        )
+    )
+    _run(merged.async_delete_event("google-created-uid"))
+
+    assert entities["calendar.google_work"].deleted == [
+        {
+            "uid": "google-created-uid",
+            "recurrence_id": None,
+            "recurrence_range": None,
+        }
+    ]
+    assert entities["calendar.apple_family"].deleted == []
+
+
+def test_seed_source_map_for_created_event_preserves_existing_owners(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    created_start = datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc)
+    created_end = datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc)
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [
+                CalendarEvent(
+                    start=created_start,
+                    end=created_end,
+                    summary="Created",
+                    uid="google-existing-uid",
+                )
+            ],
+            full,
+            created_event_uid="google-created-uid",
+        ),
+        "calendar.apple_family": FakeSourceCalendar([], full),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-7d",
+        "Merged",
+        list(entities.keys()),
+        "calendar.google_work",
+    )
+    created_key = "summary_start_end\x00created\x002024-01-02T10:00\x002024-01-02T11:00"
+    merged._source_map = {
+        created_key: ["calendar.apple_family"],
+        "uid\x00apple-shared-uid": ["calendar.apple_family"],
+    }
+
+    created_event = CalendarEvent(
+        start=created_start,
+        end=created_end,
+        summary="Created",
+    )
+
+    _run(
+        merged._async_seed_source_map_for_created_event(
+            entities["calendar.google_work"],
+            "calendar.google_work",
+            created_event,
+        )
+    )
+
+    assert merged._source_map[created_key] == [
+        "calendar.apple_family",
+        "calendar.google_work",
+    ]
+    assert merged._source_map["uid\x00google-existing-uid"] == [
+        "calendar.apple_family",
+        "calendar.google_work",
+    ]
 
 
 @pytest.mark.parametrize("owners", _all_non_empty_source_combinations())
@@ -622,7 +844,7 @@ def test_update_raises_if_no_source_mapping_for_uid(calendar_module):
         "entry-10",
         "Merged",
         ["calendar.google_work"],
-        "calendar.google_work",
+        None,
     )
 
     with pytest.raises(HomeAssistantError, match="could not find source"):
@@ -643,7 +865,7 @@ def test_delete_raises_if_no_source_mapping_for_uid(calendar_module):
         "entry-11",
         "Merged",
         ["calendar.google_work"],
-        "calendar.google_work",
+        None,
     )
 
     with pytest.raises(HomeAssistantError, match="could not find source"):
