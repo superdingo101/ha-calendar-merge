@@ -680,6 +680,69 @@ def test_delete_after_create_uses_seeded_uid_mapping(calendar_module):
     assert entities["calendar.apple_family"].deleted == []
 
 
+def test_seed_source_map_for_created_event_preserves_existing_owners(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    created_start = datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc)
+    created_end = datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc)
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [
+                CalendarEvent(
+                    start=created_start,
+                    end=created_end,
+                    summary="Created",
+                    uid="google-existing-uid",
+                )
+            ],
+            full,
+            created_event_uid="google-created-uid",
+        ),
+        "calendar.apple_family": FakeSourceCalendar([], full),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    hass.services = FakeServices(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-7d",
+        "Merged",
+        list(entities.keys()),
+        "calendar.google_work",
+    )
+    created_key = "summary_start_end\x00created\x002024-01-02T10:00\x002024-01-02T11:00"
+    merged._source_map = {
+        created_key: ["calendar.apple_family"],
+        "uid\x00apple-shared-uid": ["calendar.apple_family"],
+    }
+
+    created_event = CalendarEvent(
+        start=created_start,
+        end=created_end,
+        summary="Created",
+    )
+
+    _run(
+        merged._async_seed_source_map_for_created_event(
+            entities["calendar.google_work"],
+            "calendar.google_work",
+            created_event,
+        )
+    )
+
+    assert merged._source_map[created_key] == [
+        "calendar.apple_family",
+        "calendar.google_work",
+    ]
+    assert merged._source_map["uid\x00google-existing-uid"] == [
+        "calendar.apple_family",
+        "calendar.google_work",
+    ]
+
+
 @pytest.mark.parametrize("owners", _all_non_empty_source_combinations())
 def test_update_proxies_to_all_owner_combinations(calendar_module, owners):
     full = (

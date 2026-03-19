@@ -539,13 +539,19 @@ class MergedCalendarEntity(CalendarEntity):
             if _dedup_key(source_event) != created_key:
                 continue
 
-            self._source_map[created_key] = [entity_id]
+            owners = list(dict.fromkeys([*self._source_map.get(created_key, []), entity_id]))
+            self._source_map[created_key] = owners
             if source_event.uid:
-                self._source_map[f"uid\x00{source_event.uid}"] = [entity_id]
+                uid_key = f"uid\x00{source_event.uid}"
+                uid_owners = list(
+                    dict.fromkeys([*self._source_map.get(uid_key, []), *owners])
+                )
+                self._source_map[uid_key] = uid_owners
             _LOGGER.debug(
-                "Seeded source map for newly created event uid=%r on %s",
+                "Seeded source map for newly created event uid=%r on %s with owners=%s",
                 source_event.uid,
                 entity_id,
+                owners,
             )
             return
 
