@@ -383,7 +383,7 @@ class MergedCalendarEntity(CalendarEntity):
         HA passes the updated event as a plain dict of rfc5545 fields.
         We strip our merge annotation from the description field before forwarding.
         """
-        sources = self._resolve_sources_for_uid(uid)
+        sources = await self._async_resolve_sources_for_uid(uid)
         if not sources:
             raise HomeAssistantError(
                 f"Calendar Merge: could not find source calendar(s) for event "
@@ -435,7 +435,7 @@ class MergedCalendarEntity(CalendarEntity):
         """
         Delete an event, proxied to every source calendar that owns it.
         """
-        sources = self._resolve_sources_for_uid(uid)
+        sources = await self._async_resolve_sources_for_uid(uid)
         if not sources:
             raise HomeAssistantError(
                 f"Calendar Merge: could not find source calendar(s) for event "
@@ -485,6 +485,62 @@ class MergedCalendarEntity(CalendarEntity):
                 if uid in map_key:
                     return sources
         return []
+
+    async def _async_resolve_sources_for_uid(self, uid: str) -> list[str]:
+        """Return owners for a UID, scanning source calendars if cache is cold."""
+        sources = self._resolve_sources_for_uid(uid)
+        if sources or not uid:
+            return sources
+
+        sources = await self._async_backfill_sources_for_uid(uid)
+        if sources:
+            _LOGGER.debug("Resolved uid=%r by scanning source calendars: %s", uid, sources)
+        return sources
+
+    async def _async_backfill_sources_for_uid(self, uid: str) -> list[str]:
+        """Scan source calendars for a UID and update the source map cache."""
+        now = dt_util.now()
+        start_date = now - timedelta(days=365 * 5)
+        end_date = now + timedelta(days=365 * 5)
+        owners: list[str] = []
+
+        for entity_id in self._source_entity_ids:
+            entity = self._resolve_entity(entity_id)
+            if entity is None:
+                continue
+            try:
+                events: list[CalendarEvent] = await entity.async_get_events(
+                    self.hass,
+                    start_date,
+                    end_date,
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Unable to scan %s while backfilling uid=%r",
+                    entity_id,
+                    uid,
+                    exc_info=True,
+                )
+                continue
+
+            for source_event in events:
+                if source_event.uid != uid:
+                    continue
+                owners.append(entity_id)
+                dedup_key = _dedup_key(source_event)
+                dedup_owners = list(
+                    dict.fromkeys([*self._source_map.get(dedup_key, []), entity_id])
+                )
+                self._source_map[dedup_key] = dedup_owners
+                break
+
+        if not owners:
+            return []
+
+        uid_key = f"uid\x00{uid}"
+        resolved = list(dict.fromkeys([*self._source_map.get(uid_key, []), *owners]))
+        self._source_map[uid_key] = resolved
+        return resolved
 
     async def _async_refresh_default_calendar_after_create(
         self,

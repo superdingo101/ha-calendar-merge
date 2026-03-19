@@ -830,6 +830,44 @@ def test_delete_proxies_to_all_owner_combinations(calendar_module, owners):
             assert source.deleted == []
 
 
+def test_update_backfills_source_mapping_by_uid_when_cache_is_empty(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    start = datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc)
+    end = datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc)
+    entities = {
+        "calendar.google_work": FakeSourceCalendar(
+            [CalendarEvent(start=start, end=end, summary="Meeting", uid="event-lookup")],
+            full,
+        ),
+        "calendar.apple_family": FakeSourceCalendar([], full),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-9b",
+        "Merged",
+        list(entities.keys()),
+        None,
+    )
+
+    _run(merged.async_update_event("event-lookup", {"summary": "Changed"}))
+
+    assert entities["calendar.google_work"].updated == [
+        {
+            "uid": "event-lookup",
+            "event": {"summary": "Changed"},
+            "recurrence_id": None,
+            "recurrence_range": None,
+        }
+    ]
+    assert merged._source_map["uid\x00event-lookup"] == ["calendar.google_work"]
+
+
 def test_update_raises_if_no_source_mapping_for_uid(calendar_module):
     full = (
         CalendarEntityFeature.CREATE_EVENT
@@ -849,6 +887,44 @@ def test_update_raises_if_no_source_mapping_for_uid(calendar_module):
 
     with pytest.raises(HomeAssistantError, match="could not find source"):
         _run(merged.async_update_event("missing", {"summary": "x"}))
+
+
+def test_delete_backfills_source_mapping_by_uid_when_cache_is_empty(calendar_module):
+    full = (
+        CalendarEntityFeature.CREATE_EVENT
+        | CalendarEntityFeature.UPDATE_EVENT
+        | CalendarEntityFeature.DELETE_EVENT
+    )
+    start = datetime(2024, 1, 2, 10, 0, tzinfo=timezone.utc)
+    end = datetime(2024, 1, 2, 11, 0, tzinfo=timezone.utc)
+    entities = {
+        "calendar.google_work": FakeSourceCalendar([], full),
+        "calendar.apple_family": FakeSourceCalendar(
+            [CalendarEvent(start=start, end=end, summary="Dinner", uid="event-delete")],
+            full,
+        ),
+    }
+    hass = HomeAssistant()
+    hass.data[calendar_module.CALENDAR_DOMAIN] = FakeCalendarComponent(entities)
+    merged = calendar_module.MergedCalendarEntity(
+        hass,
+        "entry-10b",
+        "Merged",
+        list(entities.keys()),
+        None,
+    )
+
+    _run(merged.async_delete_event("event-delete"))
+
+    assert entities["calendar.google_work"].deleted == []
+    assert entities["calendar.apple_family"].deleted == [
+        {
+            "uid": "event-delete",
+            "recurrence_id": None,
+            "recurrence_range": None,
+        }
+    ]
+    assert merged._source_map["uid\x00event-delete"] == ["calendar.apple_family"]
 
 
 def test_delete_raises_if_no_source_mapping_for_uid(calendar_module):
