@@ -1,0 +1,45 @@
+name: Generate Playwright Baselines PR
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-baselines-pr:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: Generate/update visual baselines
+        run: npx playwright test --update-snapshots
+
+      - name: Show generated snapshot changes
+        run: |
+          git status --short
+          find playwright -path "*-snapshots/*.png" -type f | sort
+
+      - name: Create or update pull request with updated baselines
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: playwright-baselines
+          delete-branch: true
+          title: Update Playwright visual baselines
+          commit-message: Add/update Playwright visual baselines
+          body: |
+            Updates Playwright visual baseline images generated in GitHub Actions.
+
+            Review the changed PNGs before merging.
+          add-paths: |
+            playwright/**/*-snapshots/*.png
