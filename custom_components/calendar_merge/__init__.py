@@ -9,7 +9,13 @@ from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_CALENDAR_NAME, CONF_SOURCE_CALENDARS, DOMAIN, PLATFORMS
+from .const import (
+    CONF_CALENDAR_NAME,
+    CONF_DEFAULT_CALENDAR,
+    CONF_SOURCE_CALENDARS,
+    DOMAIN,
+    PLATFORMS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +28,7 @@ _ENTRY_SCHEMA = vol.Schema(
         vol.Required(CONF_SOURCE_CALENDARS): vol.All(
             cv.ensure_list, [cv.entity_id]
         ),
+        vol.Optional(CONF_DEFAULT_CALENDAR): cv.entity_id,
     }
 )
 
