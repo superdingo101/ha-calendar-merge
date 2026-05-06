@@ -12,17 +12,43 @@ import pytest
 def _install_ha_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     vol_mod = types.ModuleType("voluptuous")
     vol_mod.ALLOW_EXTRA = object()
-    vol_mod.Required = lambda key, default=None: key
-    vol_mod.Optional = lambda key, default=None: key
-    vol_mod.All = lambda *validators: validators[0] if validators else (lambda v: v)
+
+    class _Invalid(Exception):
+        pass
+
+    def _apply_validator(validator, value):
+        if isinstance(validator, list):
+            item_validator = validator[0]
+            return [_apply_validator(item_validator, item) for item in value]
+        if callable(validator):
+            return validator(value)
+        return value
 
     class _Schema:
-        def __init__(self, *_args, **_kwargs):
-            pass
+        def __init__(self, schema, **_kwargs):
+            self.schema = schema
 
         def __call__(self, value):
+            if not isinstance(self.schema, dict):
+                return _apply_validator(self.schema, value)
+            result = dict(value)
+            for key, validator in self.schema.items():
+                if key in result:
+                    result[key] = _apply_validator(validator, result[key])
+            return result
+
+    def _all(*validators):
+        def validate(value):
+            for validator in validators:
+                value = _apply_validator(validator, value)
             return value
 
+        return validate
+
+    vol_mod.Invalid = _Invalid
+    vol_mod.Required = lambda key, default=None: key
+    vol_mod.Optional = lambda key, default=None: key
+    vol_mod.All = _all
     vol_mod.Schema = _Schema
     monkeypatch.setitem(sys.modules, "voluptuous", vol_mod)
 
@@ -115,20 +141,22 @@ def test_readme_yaml_example_validates(modules):
     assert validated["calendar_merge"][0]["default_calendar"] == "calendar.google_work"
 
 
-def test_yaml_import_updates_existing_entry(modules):
+def test_yaml_import_updates_existing_entry_and_clears_options(modules):
     _init_mod, flow_mod, const = modules
 
     class FakeEntry:
         entry_id = "abc"
         data = {const.CONF_CALENDAR_NAME: "Work"}
+        options = {const.CONF_SOURCE_CALENDARS: ["calendar.stale"]}
 
     updated = {}
     reloaded = []
 
     class FakeConfigEntries:
-        def async_update_entry(self, entry, data):
+        def async_update_entry(self, entry, data, options):
             updated["entry"] = entry
             updated["data"] = data
+            updated["options"] = options
 
         async def async_reload(self, entry_id):
             reloaded.append(entry_id)
@@ -151,4 +179,23 @@ def test_yaml_import_updates_existing_entry(modules):
     assert result == {"reason": "already_configured"}
     assert updated["entry"].entry_id == "abc"
     assert updated["data"][const.CONF_DEFAULT_CALENDAR] == "calendar.google_work"
+    assert updated["options"] == {}
     assert reloaded == ["abc"]
+
+
+def test_yaml_rejects_default_calendar_outside_sources(modules):
+    init_mod, _flow_mod, const = modules
+    cfg = {
+        "calendar_merge": [
+            {
+                "name": "Work",
+                "entity_id": ["calendar.google_work"],
+                "default_calendar": "calendar.personal",
+            }
+        ]
+    }
+
+    with pytest.raises(Exception) as err:
+        init_mod.CONFIG_SCHEMA(cfg)
+
+    assert const.CONF_DEFAULT_CALENDAR in str(err.value)
