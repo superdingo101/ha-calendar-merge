@@ -9,20 +9,41 @@ from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_CALENDAR_NAME, CONF_SOURCE_CALENDARS, DOMAIN, PLATFORMS
+from .const import (
+    CONF_CALENDAR_NAME,
+    CONF_DEFAULT_CALENDAR,
+    CONF_SOURCE_CALENDARS,
+    DOMAIN,
+    PLATFORMS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # YAML configuration schema
 # ---------------------------------------------------------------------------
-_ENTRY_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_CALENDAR_NAME): cv.string,
-        vol.Required(CONF_SOURCE_CALENDARS): vol.All(
-            cv.ensure_list, [cv.entity_id]
-        ),
-    }
+def _validate_yaml_entry(entry: dict) -> dict:
+    """Validate invariants for a YAML-configured merge entry."""
+    sources = entry.get(CONF_SOURCE_CALENDARS) or []
+    default = entry.get(CONF_DEFAULT_CALENDAR)
+    if default and default not in sources:
+        raise vol.Invalid(
+            f"{CONF_DEFAULT_CALENDAR} must be one of {CONF_SOURCE_CALENDARS}"
+        )
+    return entry
+
+
+_ENTRY_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Required(CONF_CALENDAR_NAME): cv.string,
+            vol.Required(CONF_SOURCE_CALENDARS): vol.All(
+                cv.ensure_list, [cv.entity_id]
+            ),
+            vol.Optional(CONF_DEFAULT_CALENDAR): cv.entity_id,
+        }
+    ),
+    _validate_yaml_entry,
 )
 
 CONFIG_SCHEMA = vol.Schema(

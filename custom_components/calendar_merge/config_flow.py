@@ -96,10 +96,11 @@ class CalendarMergeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if entry.data.get(CONF_CALENDAR_NAME) == import_data.get(
                 CONF_CALENDAR_NAME
             ):
-                _LOGGER.debug(
-                    "Skipping YAML import for '%s': entry already exists.",
-                    import_data.get(CONF_CALENDAR_NAME),
+                self.hass.config_entries.async_update_entry(
+                    entry, data=import_data, options={}
                 )
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                _LOGGER.debug("Updated YAML import for '%s'.", import_data.get(CONF_CALENDAR_NAME))
                 return self.async_abort(reason="already_configured")
 
         title = import_data[CONF_CALENDAR_NAME]

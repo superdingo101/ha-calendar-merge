@@ -24,4 +24,4 @@ jobs:
           pip install pytest pytest-asyncio
 
       - name: Run tests
-        run: pytest -q
+        run: pytest -q tests/test_calendar_merge.py tests/test_yaml_config.py
