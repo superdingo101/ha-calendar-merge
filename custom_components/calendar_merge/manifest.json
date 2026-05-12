@@ -1,7 +1,7 @@
 {
   "domain": "calendar_merge",
   "name": "Calendar Merge",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "documentation": "https://github.com/superdingo101/ha-calendar-merge",
   "issue_tracker": "https://github.com/superdingo101/ha-calendar-merge/issues",
   "dependencies": ["calendar"],
